@@ -8,7 +8,7 @@
 //!
 //! # Platform-Specific Details
 //!
-//! - **Windows/Linux (Proton)**: Uses `version.dll` for DLL injection
+//! - **Windows/Linux (Proton)**: Uses `winmm.dll` (or legacy `version.dll`) for DLL injection
 //! - **macOS**: Uses `liblovely.dylib` with `DYLD_INSERT_LIBRARIES`
 //! - **Linux (native LOVE)**: Uses `liblovely.so` with `LD_PRELOAD`
 
@@ -97,18 +97,32 @@ fn save_persisted_version_cache(version: &str) {
     }
 }
 
-/// Ensures the Lovely version.dll exists in the game directory (Windows/Linux).
+/// Ensures the Lovely injector DLL (winmm.dll or legacy version.dll) exists in the game directory (Windows/Linux).
 ///
 /// Downloads the DLL from GitHub releases if not present.
 /// On Linux, caches the DLL in ~/.config/Balatro/bins/ and copies to game directory
 /// each launch, since Steam may verify/restore game files.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub async fn ensure_version_dll_exists(game_path: &Path) -> Result<PathBuf, AppError> {
-    let dll_path = game_path.join("version.dll");
+    let winmm_path = game_path.join("winmm.dll");
+    let version_path = game_path.join("version.dll");
 
     #[cfg(target_os = "linux")]
     {
-        restore_disabled_injector_file(&dll_path)?;
+        restore_disabled_injector_file(&winmm_path)?;
+        restore_disabled_injector_file(&version_path)?;
+
+        // If winmm.dll is in game_path, clean up legacy version.dll
+        if winmm_path.exists() {
+            if version_path.exists() {
+                let _ = tokio::fs::remove_file(&version_path).await;
+            }
+            if let Some(disabled) = disabled_injector_path(&version_path) {
+                if disabled.exists() {
+                    let _ = tokio::fs::remove_file(&disabled).await;
+                }
+            }
+        }
 
         // On Linux, cache the DLL and copy on each launch to survive Steam file verification
         let config_dir = dirs::config_dir()
@@ -119,45 +133,88 @@ pub async fn ensure_version_dll_exists(game_path: &Path) -> Result<PathBuf, AppE
             source: e.to_string(),
         })?;
 
-        let cached_dll = bins_dir.join("version.dll");
-        if !cached_dll.exists() {
-            if dll_path.exists() {
-                fs::copy(&dll_path, &cached_dll).map_err(|e| AppError::FileCopy {
-                    source: dll_path.display().to_string(),
-                    dest: cached_dll.display().to_string(),
-                    source_error: e.to_string(),
-                })?;
-            } else {
-                download_version_dll(&cached_dll).await?;
+        let cached_winmm = bins_dir.join("winmm.dll");
+        let cached_version = bins_dir.join("version.dll");
+
+        let (cached_target, dest_target) = if cached_winmm.exists() || (!cached_version.exists() && winmm_path.exists()) {
+            if !cached_winmm.exists() && winmm_path.exists() {
+                let _ = fs::copy(&winmm_path, &cached_winmm);
             }
-        }
+            (cached_winmm, winmm_path)
+        } else if cached_version.exists() || version_path.exists() {
+            if !cached_version.exists() && version_path.exists() {
+                let _ = fs::copy(&version_path, &cached_version);
+            }
+            (cached_version, version_path)
+        } else {
+            let downloaded = download_injector_dll(&bins_dir).await?;
+            let filename = downloaded.file_name().unwrap();
+            (downloaded, game_path.join(filename))
+        };
 
         // Always copy to game directory (may have been removed by Steam)
-        if let Err(e) = fs::copy(&cached_dll, &dll_path) {
+        if let Err(e) = fs::copy(&cached_target, &dest_target) {
             return Err(AppError::FileCopy {
-                source: cached_dll.display().to_string(),
-                dest: dll_path.display().to_string(),
+                source: cached_target.display().to_string(),
+                dest: dest_target.display().to_string(),
                 source_error: e.to_string(),
             });
         }
         log::debug!(
-            "Copied version.dll from cache {} to {}",
-            cached_dll.display(),
-            dll_path.display()
+            "Copied Lovely DLL from cache {} to {}",
+            cached_target.display(),
+            dest_target.display()
         );
 
-        Ok(dll_path)
+        if dest_target.file_name().is_some_and(|f| f == "winmm.dll") {
+            let old_version = game_path.join("version.dll");
+            if old_version.exists() {
+                let _ = tokio::fs::remove_file(&old_version).await;
+            }
+            if let Some(disabled) = disabled_injector_path(&old_version) {
+                if disabled.exists() {
+                    let _ = tokio::fs::remove_file(&disabled).await;
+                }
+            }
+        }
+
+        Ok(dest_target)
     }
 
     #[cfg(target_os = "windows")]
     {
-        // On Windows, download directly to game directory
-        restore_disabled_injector_file(&dll_path)?;
-        if !dll_path.exists() {
-            download_version_dll(&dll_path).await?;
+        // On Windows, restore disabled if needed
+        restore_disabled_injector_file(&winmm_path)?;
+        restore_disabled_injector_file(&version_path)?;
+
+        if winmm_path.exists() {
+            // Clean up old version.dll if winmm.dll is present
+            if version_path.exists() {
+                let _ = tokio::fs::remove_file(&version_path).await;
+                log::info!("Removed old version.dll because winmm.dll is active");
+            }
+            if let Some(disabled) = disabled_injector_path(&version_path) {
+                if disabled.exists() {
+                    let _ = tokio::fs::remove_file(&disabled).await;
+                }
+            }
+            return Ok(winmm_path);
         }
-        Ok(dll_path)
+
+        if version_path.exists() {
+            return Ok(version_path);
+        }
+
+        // Neither exists: download latest Lovely injector (extracts winmm.dll or version.dll)
+        let downloaded = download_injector_dll(game_path).await?;
+        Ok(downloaded)
     }
+}
+
+/// Alias for `ensure_version_dll_exists` with updated naming.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub async fn ensure_lovely_dll_exists(game_path: &Path) -> Result<PathBuf, AppError> {
+    ensure_version_dll_exists(game_path).await
 }
 
 #[cfg(target_os = "macos")]
@@ -571,24 +628,16 @@ pub async fn remove_installed_lovely() -> Result<(), AppError> {
         let balatro_paths = crate::finder::get_balatro_paths_cached();
         if !balatro_paths.is_empty() {
             let game_path = &balatro_paths[0];
-            let dll_path = game_path.join("version.dll");
-            if dll_path.exists() {
-                tokio::fs::remove_file(&dll_path)
-                    .await
-                    .map_err(|e| AppError::FileWrite {
-                        path: dll_path.clone(),
-                        source: e.to_string(),
-                    })?;
-            }
-            if let Some(disabled_dll_path) = disabled_injector_path(&dll_path)
-                && disabled_dll_path.exists()
-            {
-                tokio::fs::remove_file(&disabled_dll_path)
-                    .await
-                    .map_err(|e| AppError::FileWrite {
-                        path: disabled_dll_path.clone(),
-                        source: e.to_string(),
-                    })?;
+            for dll_name in &["winmm.dll", "version.dll"] {
+                let dll_path = game_path.join(dll_name);
+                if dll_path.exists() {
+                    let _ = tokio::fs::remove_file(&dll_path).await;
+                }
+                if let Some(disabled_dll_path) = disabled_injector_path(&dll_path) {
+                    if disabled_dll_path.exists() {
+                        let _ = tokio::fs::remove_file(&disabled_dll_path).await;
+                    }
+                }
             }
             // Also remove liblovely.so on Linux
             #[cfg(target_os = "linux")]
@@ -597,10 +646,10 @@ pub async fn remove_installed_lovely() -> Result<(), AppError> {
                 if so_path.exists() {
                     let _ = tokio::fs::remove_file(&so_path).await;
                 }
-                if let Some(disabled_so_path) = disabled_injector_path(&so_path)
-                    && disabled_so_path.exists()
-                {
-                    let _ = tokio::fs::remove_file(&disabled_so_path).await;
+                if let Some(disabled_so_path) = disabled_injector_path(&so_path) {
+                    if disabled_so_path.exists() {
+                        let _ = tokio::fs::remove_file(&disabled_so_path).await;
+                    }
                 }
             }
         }
@@ -610,27 +659,29 @@ pub async fn remove_installed_lovely() -> Result<(), AppError> {
         {
             if let Some(config_dir) = dirs::config_dir() {
                 let bins_dir = config_dir.join("Balatro/bins");
-                let cached_dll = bins_dir.join("version.dll");
+                for dll_name in &["winmm.dll", "version.dll"] {
+                    let cached_dll = bins_dir.join(dll_name);
+                    if cached_dll.exists() {
+                        let _ = tokio::fs::remove_file(&cached_dll).await;
+                        log::info!("Removed cached {}", dll_name);
+                    }
+                    if let Some(disabled_cached_dll) = disabled_injector_path(&cached_dll) {
+                        if disabled_cached_dll.exists() {
+                            let _ = tokio::fs::remove_file(&disabled_cached_dll).await;
+                            log::info!("Removed cached {}.disabled", dll_name);
+                        }
+                    }
+                }
                 let cached_so = bins_dir.join("liblovely.so");
-                if cached_dll.exists() {
-                    let _ = tokio::fs::remove_file(&cached_dll).await;
-                    log::info!("Removed cached version.dll");
-                }
-                if let Some(disabled_cached_dll) = disabled_injector_path(&cached_dll)
-                    && disabled_cached_dll.exists()
-                {
-                    let _ = tokio::fs::remove_file(&disabled_cached_dll).await;
-                    log::info!("Removed cached version.dll.disabled");
-                }
                 if cached_so.exists() {
                     let _ = tokio::fs::remove_file(&cached_so).await;
                     log::info!("Removed cached liblovely.so");
                 }
-                if let Some(disabled_cached_so) = disabled_injector_path(&cached_so)
-                    && disabled_cached_so.exists()
-                {
-                    let _ = tokio::fs::remove_file(&disabled_cached_so).await;
-                    log::info!("Removed cached liblovely.so.disabled");
+                if let Some(disabled_cached_so) = disabled_injector_path(&cached_so) {
+                    if disabled_cached_so.exists() {
+                        let _ = tokio::fs::remove_file(&disabled_cached_so).await;
+                        log::info!("Removed cached liblovely.so.disabled");
+                    }
                 }
             }
         }
@@ -659,6 +710,14 @@ pub fn injector_artifact_exists(active_path: &Path) -> bool {
         || disabled_injector_path(active_path)
             .as_deref()
             .is_some_and(Path::exists)
+}
+
+/// Returns true if Lovely Windows injector artifacts (winmm.dll or legacy version.dll)
+/// exist in the given directory (active or disabled).
+pub fn windows_injector_exists_in_dir(dir: &Path) -> bool {
+    let winmm = dir.join("winmm.dll");
+    let version = dir.join("version.dll");
+    injector_artifact_exists(&winmm) || injector_artifact_exists(&version)
 }
 
 fn restore_disabled_injector_file(active_path: &Path) -> Result<bool, AppError> {
@@ -700,20 +759,27 @@ pub fn set_injector_enabled(enabled: bool) -> Result<(), AppError> {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
-        // For Windows and Linux (Proton), we need to toggle version.dll in the game directory
+        // For Windows and Linux (Proton), toggle winmm.dll and/or version.dll in the game directory
         let balatro_paths = crate::finder::get_balatro_paths_cached();
         if balatro_paths.is_empty() {
-            // No game path found - if we're enabling, that's an error; if disabling, nothing to do
             if enabled {
                 return Err(AppError::DirNotFound(PathBuf::from("Balatro installation")));
             }
             return Ok(());
         }
         let game_path = &balatro_paths[0];
-        let active_path = game_path.join("version.dll");
-        let disabled_path = game_path.join("version.dll.disabled");
 
-        toggle_injector_file(&active_path, &disabled_path, enabled)?;
+        let winmm_active = game_path.join("winmm.dll");
+        let winmm_disabled = game_path.join("winmm.dll.disabled");
+        if winmm_active.exists() || winmm_disabled.exists() {
+            toggle_injector_file(&winmm_active, &winmm_disabled, enabled)?;
+        }
+
+        let version_active = game_path.join("version.dll");
+        let version_disabled = game_path.join("version.dll.disabled");
+        if version_active.exists() || version_disabled.exists() {
+            toggle_injector_file(&version_active, &version_disabled, enabled)?;
+        }
 
         // On Linux, also handle liblovely.so for native LOVE builds
         #[cfg(target_os = "linux")]
@@ -722,11 +788,9 @@ pub fn set_injector_enabled(enabled: bool) -> Result<(), AppError> {
                 let bins_dir = config_dir.join("Balatro/bins");
                 let so_active = bins_dir.join("liblovely.so");
                 let so_disabled = bins_dir.join("liblovely.so.disabled");
-                // Also check in game directory
                 let game_so_active = game_path.join("liblovely.so");
                 let game_so_disabled = game_path.join("liblovely.so.disabled");
 
-                // Toggle both locations (ignore errors if files don't exist)
                 let _ = toggle_injector_file(&so_active, &so_disabled, enabled);
                 let _ = toggle_injector_file(&game_so_active, &game_so_disabled, enabled);
             }
@@ -758,12 +822,29 @@ pub fn is_injector_enabled() -> Result<bool, AppError> {
     {
         let balatro_paths = crate::finder::get_balatro_paths_cached();
         if balatro_paths.is_empty() {
-            // No game path - consider it "enabled" (no injector to disable)
             return Ok(true);
         }
         let game_path = &balatro_paths[0];
-        let active_path = game_path.join("version.dll");
-        Ok(active_path.exists())
+
+        let winmm_active = game_path.join("winmm.dll");
+        let winmm_disabled = game_path.join("winmm.dll.disabled");
+        if winmm_active.exists() {
+            return Ok(true);
+        }
+        if winmm_disabled.exists() {
+            return Ok(false);
+        }
+
+        let version_active = game_path.join("version.dll");
+        let version_disabled = game_path.join("version.dll.disabled");
+        if version_active.exists() {
+            return Ok(true);
+        }
+        if version_disabled.exists() {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -959,16 +1040,16 @@ async fn download_lovely_linux(target_path: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-async fn download_version_dll(target_path: &PathBuf) -> Result<(), AppError> {
+async fn download_injector_dll(target_dir: &Path) -> Result<PathBuf, AppError> {
     let temp_dir = tempfile::tempdir().map_err(|e| AppError::FileWrite {
         path: PathBuf::from("temp directory"),
         source: e.to_string(),
     })?;
 
-    // URL to the latest version.dll in the lovely injector repository
+    // URL to the latest Lovely injector repository release
     let url = "https://github.com/ethangreen-dev/lovely-injector/releases/latest/download/lovely-x86_64-pc-windows-msvc.zip";
 
-    log::info!("Downloading Lovely injector for Windows from: {}", url);
+    log::info!("Downloading Lovely injector for Windows/Proton from: {}", url);
 
     // Download the ZIP file
     let client = shared_client();
@@ -1015,8 +1096,8 @@ async fn download_version_dll(target_path: &PathBuf) -> Result<(), AppError> {
         source: e.to_string(),
     })?;
 
-    // Find and extract version.dll from the ZIP
-    let mut found_dll = false;
+    // Find and extract winmm.dll or version.dll from the ZIP
+    let mut extracted_file: Option<PathBuf> = None;
     for i in 0..archive.len() {
         let mut file = match archive.by_index(i) {
             Ok(file) => file,
@@ -1028,29 +1109,63 @@ async fn download_version_dll(target_path: &PathBuf) -> Result<(), AppError> {
 
         let entry_name = file.name().to_string();
 
-        if entry_name.ends_with("version.dll") {
-            log::info!("Found version.dll in zip archive");
-            let mut outfile = File::create(target_path).map_err(|e| AppError::FileWrite {
-                path: target_path.to_path_buf(),
+        let dll_filename = if entry_name.ends_with("winmm.dll") {
+            Some("winmm.dll")
+        } else if entry_name.ends_with("version.dll") {
+            Some("version.dll")
+        } else {
+            None
+        };
+
+        if let Some(filename) = dll_filename {
+            log::info!("Found {} in zip archive", filename);
+            let target_path = target_dir.join(filename);
+            let mut outfile = File::create(&target_path).map_err(|e| AppError::FileWrite {
+                path: target_path.clone(),
                 source: e.to_string(),
             })?;
 
             std::io::copy(&mut file, &mut outfile).map_err(|e| AppError::FileWrite {
-                path: target_path.to_path_buf(),
+                path: target_path.clone(),
                 source: e.to_string(),
             })?;
 
-            found_dll = true;
+            // If we extracted winmm.dll, clean up legacy version.dll and version.dll.disabled
+            if filename == "winmm.dll" {
+                let old_version = target_dir.join("version.dll");
+                let old_version_disabled = target_dir.join("version.dll.disabled");
+                if old_version.exists() {
+                    let _ = std::fs::remove_file(&old_version);
+                    log::info!("Removed legacy version.dll after extracting winmm.dll");
+                }
+                if old_version_disabled.exists() {
+                    let _ = std::fs::remove_file(&old_version_disabled);
+                    log::info!("Removed legacy version.dll.disabled after extracting winmm.dll");
+                }
+            }
+
+            extracted_file = Some(target_path);
             break;
         }
     }
 
-    if !found_dll {
-        return Err(AppError::InvalidState(
-            "version.dll not found in downloaded zip".to_string(),
-        ));
+    match extracted_file {
+        Some(path) => Ok(path),
+        None => Err(AppError::InvalidState(
+            "Neither winmm.dll nor version.dll found in downloaded zip".to_string(),
+        )),
     }
+}
 
+#[allow(dead_code)]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+async fn download_version_dll(target_path: &Path) -> Result<(), AppError> {
+    let target_dir = if target_path.is_dir() {
+        target_path
+    } else {
+        target_path.parent().unwrap_or(target_path)
+    };
+    download_injector_dll(target_dir).await?;
     Ok(())
 }
 
@@ -1173,5 +1288,34 @@ mod tests {
         assert!(active.exists());
         assert!(!disabled.exists());
         assert_eq!(std::fs::read(&active).unwrap(), b"disabled");
+    }
+
+    #[test]
+    fn test_windows_injector_exists_in_dir() {
+        let dir = tempdir().unwrap();
+        assert!(!windows_injector_exists_in_dir(dir.path()));
+
+        // Active winmm.dll
+        let winmm = dir.path().join("winmm.dll");
+        std::fs::write(&winmm, b"test").unwrap();
+        assert!(windows_injector_exists_in_dir(dir.path()));
+        std::fs::remove_file(&winmm).unwrap();
+
+        // Disabled winmm.dll
+        let winmm_disabled = dir.path().join("winmm.dll.disabled");
+        std::fs::write(&winmm_disabled, b"test").unwrap();
+        assert!(windows_injector_exists_in_dir(dir.path()));
+        std::fs::remove_file(&winmm_disabled).unwrap();
+
+        // Active version.dll
+        let version = dir.path().join("version.dll");
+        std::fs::write(&version, b"test").unwrap();
+        assert!(windows_injector_exists_in_dir(dir.path()));
+        std::fs::remove_file(&version).unwrap();
+
+        // Disabled version.dll
+        let version_disabled = dir.path().join("version.dll.disabled");
+        std::fs::write(&version_disabled, b"test").unwrap();
+        assert!(windows_injector_exists_in_dir(dir.path()));
     }
 }

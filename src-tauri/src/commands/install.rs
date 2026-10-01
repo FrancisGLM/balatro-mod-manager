@@ -434,10 +434,10 @@ pub async fn launch_balatro(state: tauri::State<'_, AppState>) -> Result<(), Str
     let path = PathBuf::from(path_str);
     let is_vanilla = launch_mode == "vanilla";
 
-    // Always ensure version.dll exists so modded mode works after vanilla launch
+    // Always ensure Lovely DLL exists so modded mode works after vanilla launch
     ensure_version_dll_exists(&path)
         .await
-        .map_err(|e| format!("Failed to ensure version.dll: {e}"))?;
+        .map_err(|e| format!("Failed to ensure Lovely DLL: {e}"))?;
 
     let mut cmd = Command::new(path.join("Balatro.exe"));
 
@@ -543,10 +543,10 @@ pub async fn launch_balatro(state: tauri::State<'_, AppState>) -> Result<(), Str
         validate_prefix_executable(&cmd_parts[0])?;
         ensure_prefix_log_dir(&envs)?;
 
-        // Always ensure version.dll exists so modded mode works after vanilla launch
+        // Always ensure Lovely DLL exists so modded mode works after vanilla launch
         ensure_version_dll_exists(&path)
             .await
-            .map_err(|e| format!("Failed to ensure version.dll: {e}"))?;
+            .map_err(|e| format!("Failed to ensure Lovely DLL: {e}"))?;
 
         bmm_lib::local_mod_detection::ensure_proton_mod_dir_link(Some(&path))?;
 
@@ -602,22 +602,35 @@ pub async fn launch_balatro(state: tauri::State<'_, AppState>) -> Result<(), Str
                 .position(|(key, _)| key.eq_ignore_ascii_case("WINEDLLOVERRIDES"));
             match winedll_idx {
                 None => {
-                    launch_envs.push(("WINEDLLOVERRIDES".to_string(), "version=n,b".to_string()));
+                    launch_envs.push((
+                        "WINEDLLOVERRIDES".to_string(),
+                        "winmm=n,b;version=n,b".to_string(),
+                    ));
                     info!(
-                        "WINEDLLOVERRIDES not set; defaulting to version=n,b for Lovely injection"
+                        "WINEDLLOVERRIDES not set; defaulting to winmm=n,b;version=n,b for Lovely injection"
                     );
                 }
                 Some(idx) => {
                     let value = launch_envs.get(idx).map(|(_, v)| v.as_str()).unwrap_or("");
-                    if !value.contains("version") {
-                        let updated = if value.is_empty() {
-                            "version=n,b".to_string()
-                        } else {
-                            format!("{value};version=n,b")
-                        };
-                        launch_envs[idx].1 = updated;
+                    let mut overrides: Vec<String> = if value.is_empty() {
+                        Vec::new()
+                    } else {
+                        value.split(';').map(|s| s.to_string()).collect()
+                    };
+                    let mut changed = false;
+                    if !overrides.iter().any(|o| o.starts_with("winmm")) {
+                        overrides.push("winmm=n,b".to_string());
+                        changed = true;
+                    }
+                    if !overrides.iter().any(|o| o.starts_with("version")) {
+                        overrides.push("version=n,b".to_string());
+                        changed = true;
+                    }
+                    if changed {
+                        launch_envs[idx].1 = overrides.join(";");
                         info!(
-                            "WINEDLLOVERRIDES missing version; appended version=n,b for Lovely injection"
+                            "Updated WINEDLLOVERRIDES with Lovely overrides: {}",
+                            launch_envs[idx].1
                         );
                     }
                 }
