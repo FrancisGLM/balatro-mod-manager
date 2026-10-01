@@ -210,7 +210,7 @@
   }
 
   async function copyLinuxLaunchOptions() {
-    const text = 'WINEDLLOVERRIDES="version=n,b" %command%';
+    const text = 'WINEDLLOVERRIDES="winmm=n,b" %command%';
     try {
       await navigator.clipboard.writeText(text);
       addMessage("Copied Steam launch options to clipboard", "success");
@@ -396,7 +396,7 @@
             <div class="linux-note-content">
               <strong>Linux Steam launch:</strong>
               Set Steam launch options for Balatro to
-              <code>WINEDLLOVERRIDES="version=n,b" %command%</code> so Lovely
+              <code>WINEDLLOVERRIDES="winmm=n,b" %command%</code> so Lovely
               and mods load when using <code>steam -applaunch 2379780</code>.
               <div class="linux-note-actions">
                 <button
@@ -521,7 +521,7 @@
             Launch command for Linux (Proton/Wine/Steam). Leave blank to use
             native LOVE. Use `{"{exe}"}` to place the Balatro.exe path, or
             `steam -applaunch 2379780` to launch via Steam. Lovely requires
-            `WINEDLLOVERRIDES=version=n,b` and uses the Proton Mods folder
+            `WINEDLLOVERRIDES=winmm=n,b` and uses the Proton Mods folder
             (linked from your host Mods dir).
           </p>
         {/if}

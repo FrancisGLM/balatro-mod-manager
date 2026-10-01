@@ -140,21 +140,18 @@ fn check_lovely_installed_inner(
     {
         // Use existing installation if already validated
         if let Some(path) = existing_installation {
-            let dll = PathBuf::from(path).join("version.dll");
-            return Ok(lovely::injector_artifact_exists(&dll));
+            return Ok(lovely::windows_injector_exists_in_dir(&PathBuf::from(path)));
         }
 
         // Fall back to DB-stored path
         if let Some(path) = db.get_installation_path().map_err(|e| e.to_string())? {
-            let dll = PathBuf::from(path).join("version.dll");
-            return Ok(lovely::injector_artifact_exists(&dll));
+            return Ok(lovely::windows_injector_exists_in_dir(&PathBuf::from(path)));
         }
 
         // Fallback to first detected Balatro path
         let candidates = bmm_lib::finder::get_balatro_paths_cached();
         if let Some(p) = candidates.first() {
-            let dll = p.join("version.dll");
-            return Ok(lovely::injector_artifact_exists(&dll));
+            return Ok(lovely::windows_injector_exists_in_dir(p));
         }
         Ok(false)
     }
@@ -164,16 +161,17 @@ fn check_lovely_installed_inner(
         use log::{debug, info};
 
         // Also check the cached locations (survive Steam file verification)
-        let cached_dll = dirs::config_dir()
-            .map(|c| c.join("Balatro/bins/version.dll"))
-            .filter(|p| lovely::injector_artifact_exists(p));
+        let cached_bins = dirs::config_dir().map(|c| c.join("Balatro/bins"));
+        let cached_dll = cached_bins
+            .as_ref()
+            .filter(|p| lovely::windows_injector_exists_in_dir(p));
         let cached_so = dirs::config_dir()
             .map(|c| c.join("Balatro/bins/liblovely.so"))
             .filter(|p| lovely::injector_artifact_exists(p));
 
         if cached_dll.is_some() || cached_so.is_some() {
             debug!(
-                "Found cached Lovely: version.dll={}, liblovely.so={}",
+                "Found cached Lovely: dll={}, liblovely.so={}",
                 cached_dll.is_some(),
                 cached_so.is_some()
             );
@@ -183,34 +181,23 @@ fn check_lovely_installed_inner(
         // Use existing installation if already validated
         if let Some(path) = existing_installation {
             let path = PathBuf::from(path);
-            // Check for both native (liblovely.so) and Proton (version.dll)
             let so = path.join("liblovely.so");
-            let dll = path.join("version.dll");
+            let has_dll = lovely::windows_injector_exists_in_dir(&path);
+            let has_so = lovely::injector_artifact_exists(&so);
             debug!("Checking Lovely at existing_installation: {:?}", path);
-            debug!(
-                "  liblovely.so exists: {}, version.dll exists: {}",
-                lovely::injector_artifact_exists(&so),
-                lovely::injector_artifact_exists(&dll)
-            );
-            return Ok(
-                lovely::injector_artifact_exists(&so) || lovely::injector_artifact_exists(&dll)
-            );
+            debug!("  liblovely.so exists: {}, dll exists: {}", has_so, has_dll);
+            return Ok(has_so || has_dll);
         }
 
         // Fall back to DB-stored path
         if let Some(path) = db.get_installation_path().map_err(|e| e.to_string())? {
             let path = PathBuf::from(path);
             let so = path.join("liblovely.so");
-            let dll = path.join("version.dll");
+            let has_dll = lovely::windows_injector_exists_in_dir(&path);
+            let has_so = lovely::injector_artifact_exists(&so);
             debug!("Checking Lovely at DB path: {:?}", path);
-            debug!(
-                "  liblovely.so exists: {}, version.dll exists: {}",
-                lovely::injector_artifact_exists(&so),
-                lovely::injector_artifact_exists(&dll)
-            );
-            return Ok(
-                lovely::injector_artifact_exists(&so) || lovely::injector_artifact_exists(&dll)
-            );
+            debug!("  liblovely.so exists: {}, dll exists: {}", has_so, has_dll);
+            return Ok(has_so || has_dll);
         }
 
         // Fallback to first detected Balatro path
@@ -221,16 +208,11 @@ fn check_lovely_installed_inner(
         );
         if let Some(p) = candidates.first() {
             let so = p.join("liblovely.so");
-            let dll = p.join("version.dll");
+            let has_dll = lovely::windows_injector_exists_in_dir(p);
+            let has_so = lovely::injector_artifact_exists(&so);
             debug!("Checking Lovely at candidate: {:?}", p);
-            debug!(
-                "  liblovely.so exists: {}, version.dll exists: {}",
-                lovely::injector_artifact_exists(&so),
-                lovely::injector_artifact_exists(&dll)
-            );
-            return Ok(
-                lovely::injector_artifact_exists(&so) || lovely::injector_artifact_exists(&dll)
-            );
+            debug!("  liblovely.so exists: {}, dll exists: {}", has_so, has_dll);
+            return Ok(has_so || has_dll);
         }
         info!("No Balatro paths found for Lovely detection");
         Ok(false)
